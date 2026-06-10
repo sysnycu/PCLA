@@ -6,6 +6,7 @@
 # https://www.apache.org/licenses/LICENSE-2.0
 
 import importlib
+import logging
 import os
 import sys
 
@@ -20,7 +21,6 @@ if os.path.exists(lmdrive_vision_encoder) and lmdrive_vision_encoder not in sys.
     sys.path.insert(0, lmdrive_vision_encoder)
 
 import carla
-import traceback
 from pcla_functions import give_path, setup_sensor_attributes, location_to_waypoint, route_maker
 from leaderboard_codes.watchdog import Watchdog
 from leaderboard_codes.timer import GameTime
@@ -29,8 +29,10 @@ from leaderboard_codes.carla_data_provider import CarlaDataProvider
 from leaderboard_codes.route_manipulation import interpolate_trajectory
 from leaderboard_codes.sensor_interface import CallBack, OpenDriveMapReader, SpeedometerReader
 
+logger = logging.getLogger(__name__)
+
 class PCLA():
-    def __init__(self, agent, vehicle, route, client):
+    def __init__(self, agent, vehicle, route, client, destroy_vehicle=False):
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         self.client = None
         self.world = None
@@ -40,6 +42,8 @@ class PCLA():
         self.agent_instance = None
         self.routePath = None
         self._watchdog = None
+        self._sensors = []
+        self._destroy_vehicle = destroy_vehicle
         self.set(agent, vehicle, route, client)
     
     def set(self, agent, vehicle, route, client):
@@ -48,9 +52,13 @@ class PCLA():
         self.vehicle = vehicle
         self.routePath = route
         self._watchdog = Watchdog(260) # TODO: Increase timeout if needed for large models
-        self.setup_agent(agent)
-        self.setup_route()
-        self.setup_sensors()
+        try:
+            self.setup_agent(agent)
+            self.setup_route()
+            self.setup_sensors()
+        except Exception:
+            self.cleanup()
+            raise
 
     def setup_agent(self, agent):
         GameTime.restart()
@@ -102,41 +110,99 @@ class PCLA():
     def setup_sensors(self):
         """Attach sensors defined by the agent to the ego-vehicle."""
         bp_library = self.world.get_blueprint_library()
-        for sensor_spec in self.agent_instance.sensors():
-            # Pseudosensors (not spawned)
-            if sensor_spec['type'].startswith('sensor.opendrive_map'):
-                sensor = OpenDriveMapReader(self.vehicle, sensor_spec['reading_frequency'])
-            elif sensor_spec['type'].startswith('sensor.speedometer'):
-                delta_time = 1/20
-                frame_rate = 1 / delta_time
-                sensor = SpeedometerReader(self.vehicle, frame_rate)
-            else:
-                # World sensors (spawned actors)
-                bp = bp_library.find(str(sensor_spec['type']))
-                bp_setup = setup_sensor_attributes(bp, sensor_spec)
-                sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
-                if sensor_spec['type'].startswith('sensor.other.gnss'):
-                    sensor_rotation = carla.Rotation()
+        try:
+            for sensor_spec in self.agent_instance.sensors():
+                # Pseudosensors (not spawned)
+                if sensor_spec['type'].startswith('sensor.opendrive_map'):
+                    sensor = OpenDriveMapReader(self.vehicle, sensor_spec['reading_frequency'])
+                elif sensor_spec['type'].startswith('sensor.speedometer'):
+                    delta_time = 1/20
+                    frame_rate = 1 / delta_time
+                    sensor = SpeedometerReader(self.vehicle, frame_rate)
                 else:
-                    sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'], yaw=sensor_spec['yaw'])
+                    # World sensors (spawned actors)
+                    bp = bp_library.find(str(sensor_spec['type']))
+                    bp_setup = setup_sensor_attributes(bp, sensor_spec)
+                    sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
+                    if sensor_spec['type'].startswith('sensor.other.gnss'):
+                        sensor_rotation = carla.Rotation()
+                    else:
+                        sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'], yaw=sensor_spec['yaw'])
 
-                # Create sensor actor
-                sensor_transform = carla.Transform(sensor_location, sensor_rotation)
-                sensor = self.world.spawn_actor(bp_setup, sensor_transform, self.vehicle)
-            # Register callback
-            sensor.listen(CallBack(sensor_spec['id'], sensor_spec['type'], sensor, self.agent_instance.sensor_interface))
+                    # Create sensor actor
+                    sensor_transform = carla.Transform(sensor_location, sensor_rotation)
+                    sensor = self.world.spawn_actor(bp_setup, sensor_transform, self.vehicle)
+                self._sensors.append(sensor)
+                sensor.listen(CallBack(sensor_spec['id'], sensor_spec['type'], sensor, self.agent_instance.sensor_interface))
+        except Exception:
+            self._cleanup_sensors()
+            raise
 
-        # Ensure sensors are created in the world
-        self.world.tick()
         CarlaDataProvider.register_actor(self.vehicle)
             
-    def get_action(self):
-        snapshot = self.world.get_snapshot()
+    def get_action(self, snapshot=None):
+        if snapshot is None:
+            snapshot = self.world.get_snapshot()
+        timestamp = None
         if snapshot:
             timestamp = snapshot.timestamp
         if timestamp:
             GameTime.on_carla_tick(timestamp)
             return self.agent_instance(vehicle = self.vehicle)
+
+    def done(self):
+        if self.agent_instance is None:
+            return False
+        for method_name in ("done", "is_done"):
+            method = getattr(self.agent_instance, method_name, None)
+            if callable(method):
+                return bool(method())
+        return False
+
+    def _cleanup_sensors(self):
+        for sensor in reversed(self._sensors):
+            try:
+                is_listening = getattr(sensor, "is_listening", None)
+                if callable(is_listening):
+                    is_listening = is_listening()
+                if is_listening and hasattr(sensor, "stop"):
+                    sensor.stop()
+            except Exception:
+                logger.exception("Failed to stop PCLA-owned sensor")
+            try:
+                if hasattr(sensor, "destroy"):
+                    sensor.destroy()
+            except Exception:
+                logger.exception("Failed to destroy PCLA-owned sensor")
+        self._sensors.clear()
+
+    def _clear_data_provider_state(self):
+        """Clear provider bookkeeping without destroying actors owned elsewhere."""
+        for attribute in (
+            "_actor_velocity_map",
+            "_actor_location_map",
+            "_actor_transform_map",
+            "_traffic_light_map",
+            "_carla_actor_pool",
+            "_vehicles_with_open_doors",
+        ):
+            value = getattr(CarlaDataProvider, attribute, None)
+            if hasattr(value, "clear"):
+                value.clear()
+        for attribute in (
+            "_map",
+            "_world",
+            "_all_actors",
+            "_client",
+            "_spawn_points",
+            "_ego_vehicle_route",
+        ):
+            if hasattr(CarlaDataProvider, attribute):
+                setattr(CarlaDataProvider, attribute, None)
+        if hasattr(CarlaDataProvider, "_sync_flag"):
+            CarlaDataProvider._sync_flag = False
+        if hasattr(CarlaDataProvider, "_spawn_index"):
+            CarlaDataProvider._spawn_index = 0
     
     def cleanup(self):
         """Remove and destroy all actors."""
@@ -149,23 +215,17 @@ class PCLA():
             if self.agent_instance is not None:
                 self.agent_instance.destroy()
                 self.agent_instance = None
-        except Exception as e:
-            print("\n\033[91mFailed to stop the agent:")
-            print(f"\n{traceback.format_exc()}\033[0m")
+        except Exception:
+            logger.exception("Failed to stop the PCLA agent")
 
-        # Stop and destroy any remaining sensors
-        alive_sensors = self.world.get_actors().filter('*sensor*')
-        for sensor in alive_sensors:
-            if sensor.is_listening():
-                sensor.stop()
-            sensor.destroy()
+        self._cleanup_sensors()
 
-        # Destroy the vehicle after sensors are cleaned up
-        try:
-            if self.vehicle is not None and self.vehicle.is_alive:
-                self.vehicle.destroy()
-        except RuntimeError:
-            pass
+        if self._destroy_vehicle:
+            try:
+                if self.vehicle is not None and self.vehicle.is_alive:
+                    self.vehicle.destroy()
+            except RuntimeError:
+                pass
 
         self.current_dir = None
         self.client = None
@@ -174,6 +234,6 @@ class PCLA():
         self.configPath = None
         self.routePath = None
         self.world = None
-        
-        CarlaDataProvider.cleanup()
+
+        self._clear_data_provider_state()
         
