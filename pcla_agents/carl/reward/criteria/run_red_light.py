@@ -18,8 +18,8 @@ class RunRedLight():
     self._distance_light = distance_light
     self.penalize_yellow_light = penalize_yellow_light
 
-    # If this assert triggers, then the TrafficLightHandler class was not initialized yet.
-    assert TrafficLightHandler.num_tl > 0
+    # Maps without traffic lights are valid. tick() naturally returns no
+    # infraction when TrafficLightHandler.num_tl is zero.
 
   def tick(self, vehicle):
     ev_tra = vehicle.get_transform()

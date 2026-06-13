@@ -11,6 +11,7 @@ from pathlib import Path
 import h5py
 
 from birds_eye_view.obs_manager import ObsManagerBase
+from birds_eye_view.birdview_map_opencv import MapImage
 from birds_eye_view.traffic_light import TrafficLightHandler
 
 COLOR_BLACK = (0, 0, 0)
@@ -76,29 +77,36 @@ class ObsManager(ObsManagerBase):
     if self._world is None or current_world.id != self._world.id:
       self._world = current_world
 
-      maps_h5_path = self._map_dir / (world_map.name.rsplit('/', 1)[1] + '.h5')
-      with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
-        self.hd_map_array = np.stack((hf['road'], hf['lane_marking_all'], hf['lane_marking_white_broken']), axis=2)
-        self.hd_map_array = self.hd_map_array.astype(dtype=np.uint8)
-        # self._road = np.array(hf['road'], dtype=np.uint8)
-        # self._lane_marking_all = np.array(hf['lane_marking_all'], dtype=np.uint8)
-        # self._lane_marking_white_broken = np.array(hf['lane_marking_white_broken'], dtype=np.uint8)
-        # self._shoulder = np.array(hf['shoulder'], dtype=np.uint8)
-        # self._parking = np.array(hf['parking'], dtype=np.uint8)
-        # self._sidewalk = np.array(hf['sidewalk'], dtype=np.uint8)
-        # self._lane_marking_yellow_broken = np.array(hf['lane_marking_yellow_broken'], dtype=np.uint8)
-        # self._lane_marking_yellow_solid = np.array(hf['lane_marking_yellow_solid'], dtype=np.uint8)
-        # self._lane_marking_white_solid = np.array(hf['lane_marking_white_solid'], dtype=np.uint8)
+      TrafficLightHandler.reset(self._world, world_map)
+      map_name = world_map.name.split('/')[-1]
+      maps_h5_path = self._map_dir / (map_name + '.h5')
+      if maps_h5_path.is_file() and map_name != 'OpenDriveMap':
+        with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
+          map_channels = (
+              np.array(hf['road'], dtype=np.uint8),
+              np.array(hf['lane_marking_all'], dtype=np.uint8),
+              np.array(hf['lane_marking_white_broken'], dtype=np.uint8),
+          )
+          self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
+          assert np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+      else:
+        map_masks = MapImage.draw_map_image(world_map, self._pixels_per_meter, precision=0.5)
+        map_channels = (
+            map_masks['road'],
+            map_masks['lane_marking_all'],
+            map_masks['lane_marking_white_broken'],
+        )
+        self._world_offset = np.array(map_masks['world_offset'], dtype=np.float32)
 
-        self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
-        assert np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+      self.hd_map_array = np.stack(map_channels, axis=2).astype(dtype=np.uint8)
 
       self._distance_threshold = np.ceil(self._width / self._pixels_per_meter)
     # dilate road mask, lbc draw road polygon with 10px boarder
     # kernel = np.ones((11, 11), np.uint8)
     # self._road = cv.dilate(self._road, kernel, iterations=1)
 
-    TrafficLightHandler.reset(self._world, world_map)
+    if TrafficLightHandler.carla_map is not world_map:
+      TrafficLightHandler.reset(self._world, world_map)
 
   @staticmethod
   def _get_stops(criteria_stop):
