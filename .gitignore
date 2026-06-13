@@ -10,4 +10,5 @@ env/
 .pytest_cache/
 .ipynb_checkpoints/
 pcla_agents/pretrained.zip
+pcla_agents/plant/carla_garage/speed_limits/*_speed_limits.npy
 .vscode

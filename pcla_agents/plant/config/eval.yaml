@@ -1,4 +1,4 @@
 checkpoint: pcla_agents/plant_pretrained/last-v3.ckpt
 
-visualize: False
+visualize: false
 viz_path: plant_viz
