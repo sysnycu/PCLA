@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 import yaml
 import time
@@ -34,6 +35,9 @@ from leaderboard_codes.route_manipulation import downsample_route
 
 from util.viz_batch import viz_batch
 
+logger = logging.getLogger(__name__)
+
+
 def get_entry_point():
     return 'PlanTAgent'
 
@@ -45,7 +49,10 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         """
         self.org_dense_route_gps = global_plan_gps
         self.org_dense_route_world_coord = global_plan_world_coord
-        ds_ids = downsample_route(global_plan_world_coord, 200)
+        # Keep command points within the range used by the common leaderboard
+        # agent. A 200 m interval collapses short PISA routes to only their
+        # endpoints and sends PlanT an out-of-distribution target point.
+        ds_ids = downsample_route(global_plan_world_coord, 50)
         self._global_plan_world_coord = [(global_plan_world_coord[x][0], global_plan_world_coord[x][1]) for x in ds_ids]
         self._global_plan = [global_plan_gps[x] for x in ds_ids]
 
@@ -68,12 +75,32 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         self.viz_path = os.path.join(cfg["viz_path"], time.strftime("%Y_%m_%d-%H:%M:%S"))
         os.makedirs(self.viz_path, exist_ok=True)
         LOAD_CKPT_PATH = cfg["checkpoint"]
-        
-        # Make the checkpoint path relative to the PCLA directory, not the current working directory
+
+        checkpoint_candidates = []
         if not os.path.isabs(LOAD_CKPT_PATH):
-            # Get the PCLA root directory (where PCLA.py is located)
             pcla_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            LOAD_CKPT_PATH = os.path.join(pcla_root, LOAD_CKPT_PATH)
+            checkpoint_candidates.append(os.path.join(pcla_root, LOAD_CKPT_PATH))
+
+            pretrained_root = os.environ.get("PCLA_PRETRAINED_ROOT")
+            path_parts = Path(LOAD_CKPT_PATH).parts
+            if pretrained_root and len(path_parts) >= 3 and path_parts[0] == "pcla_agents":
+                checkpoint_candidates.append(
+                    os.path.join(pretrained_root, *path_parts[1:])
+                )
+        else:
+            checkpoint_candidates.append(LOAD_CKPT_PATH)
+
+        LOAD_CKPT_PATH = next(
+            (path for path in checkpoint_candidates if os.path.isfile(path)),
+            checkpoint_candidates[0],
+        )
+        if not os.path.isfile(LOAD_CKPT_PATH):
+            checked_paths = ", ".join(checkpoint_candidates)
+            raise FileNotFoundError(
+                f"PlanT checkpoint not found. Checked: {checked_paths}. "
+                "Mount the official pcla_agents directory at "
+                "/opt/pcla-pretrained:ro or set PCLA_PRETRAINED_ROOT."
+            )
 
         print(f'Loading model from {LOAD_CKPT_PATH}')
 
@@ -89,7 +116,11 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
 
     def _init(self, hd_map, vehicle):
         self._route_planner = RoutePlanner(7.5, 50.0)
-        self._route_planner.set_route(self._global_plan, True)
+        # PCLA already provides the interpolated route in CARLA world
+        # coordinates. Using the GPS plan here requires matching lat/lon
+        # references, but generated OpenDRIVE maps may not expose +lat_0 and
+        # +lon_0. Avoid that lossy round-trip and plan directly in world space.
+        self._route_planner.set_route(self._global_plan_world_coord, False)
 
         # Get the hero vehicle and the CARLA world
         self._vehicle = vehicle
@@ -175,6 +206,11 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         ego_target_point = t_u.inverse_conversion_2d(target_point[:2], result['gps'], compass)
 
         result['target_point'] = tuple(ego_target_point)
+        result['raw_compass'] = float(input_data['imu'][1][-1])
+        result['route_target'] = tuple(np.asarray(target_point[:2], dtype=float))
+        result['route_head'] = [
+            tuple(np.asarray(point[0][:2], dtype=float)) for point in list(waypoint_route)[:2]
+        ]
 
         return result
 
@@ -385,6 +421,34 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         pred_wp = self.net(input_batch)[2]
 
         input_batch["waypoints"] = pred_wp.detach()
+
+        if self.step <= 3 or self.step in (39, 40, 41) or self.step % 20 == 0:
+            route_boxes = [
+                [round(value, 3) for value in box]
+                for box in boxes
+                if int(box[0]) == 2
+            ]
+            actor_boxes = [
+                [round(value, 3) for value in box]
+                for box in boxes
+                if int(box[0]) != 2
+            ]
+            logger.info(
+                "PlanT state step=%d gps=%s raw_compass=%.6f yaw=%.6f "
+                "route_head=%s route_target=%s local_target=%s speed=%.3f "
+                "route_boxes=%s actor_boxes=%s pred_wp=%s",
+                self.step,
+                np.asarray(input_data['gps']).round(3).tolist(),
+                input_data['raw_compass'],
+                input_data['yaw'],
+                input_data['route_head'],
+                input_data['route_target'],
+                tuple(round(value, 3) for value in input_data['target_point']),
+                input_data['speed'],
+                route_boxes,
+                actor_boxes,
+                pred_wp.detach().cpu().squeeze().numpy().round(3).tolist(),
+            )
         
         if self.step%25==0 and self.visualize:
             img = viz_batch(input_batch, rgb=input_data["rgb"])

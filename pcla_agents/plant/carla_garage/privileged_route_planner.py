@@ -389,7 +389,7 @@ class PrivilegedRoutePlanner(object):
             starts_with_parking_exit (bool): A flag indicating if the route starts with a parking exit scenario.
             vehicle_location (carla.Location): The initial location of the vehicle.
         """
-    self.route_index = self.extra_route_length * self.points_per_meter
+    self.route_index = 0
     self.last_route_index = self.route_index
 
     # Get all waypoint objects of the route and add extra waypoints at the end
@@ -415,8 +415,10 @@ class PrivilegedRoutePlanner(object):
           break
         route_waypoints.insert(0, prev_wps[0])
         cmds.insert(0, RoadOption.LANEFOLLOW)
-        self.route_index += 1
-        self.last_route_index += 1
+        # The route is supersampled after this loop. Advance only for prefix
+        # waypoints that the map actually supplied.
+        self.route_index += self.points_per_meter
+        self.last_route_index += self.points_per_meter
 
     # Add extra waypoints at the end of the route
     for _ in range(self.extra_route_length):
