@@ -22,7 +22,6 @@ if os.path.exists(lmdrive_vision_encoder) and lmdrive_vision_encoder not in sys.
     sys.path.insert(0, lmdrive_vision_encoder)
 
 import carla
-import torch
 from pcla_functions import give_path, setup_sensor_attributes, location_to_waypoint, route_maker
 from leaderboard_codes.watchdog import Watchdog
 from leaderboard_codes.timer import GameTime
@@ -264,6 +263,8 @@ class PCLA():
 
         # Release cached CUDA memory between agents to avoid cross-agent OOMs.
         try:
+            import torch
+
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
