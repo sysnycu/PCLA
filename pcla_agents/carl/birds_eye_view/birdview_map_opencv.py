@@ -15,7 +15,7 @@ import socket
 import psutil
 import cv2 as cv
 
-from traffic_light import TrafficLightHandler
+from .traffic_light import TrafficLightHandler
 
 COLOR_WHITE = (255, 255, 255)
 
