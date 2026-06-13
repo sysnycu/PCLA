@@ -16,6 +16,7 @@ import torch
 from leaderboard_codes.carla_data_provider import CarlaDataProvider
 
 from birds_eye_view.obs_manager import ObsManagerBase
+from birds_eye_view.birdview_map_opencv import MapImage
 from birds_eye_view.traffic_light import TrafficLightHandler
 import rl_utils as rl_u
 
@@ -95,40 +96,56 @@ class ObsManager(ObsManagerBase):
     if self.world is None or current_world.id != self.world.id:
       self.world = current_world
 
-      maps_h5_path = self.map_dir / (world_map.name.rsplit('/', 1)[1] + '.h5')
-      with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
-        parking = np.array(hf['parking'], dtype=np.uint16)
-        road = np.array(hf['road'], dtype=np.uint16)
-        # Traffic islands are sometimes labelled as shoulder lanes.
-        # Might need an extra channel for them to make clear it is not always safe to drive on them.
-        if self.config.render_shoulder:
+      # This for loop is slow ~100ms. During training, we optimize it away using the custom_leaderboard.
+      try:
+        self.route_map = CarlaDataProvider.get_map_route()
+      except AttributeError:  # Original leaderboard doesn't have this function.
+        self.route_map = []
+        for route_point in route:
+          self.route_map.append(self.world_map.get_waypoint(route_point[0].location, project_to_road=True))
+
+      TrafficLightHandler.reset(self.world, self.world_map, self.route_map, self.config)
+
+      map_name = world_map.name.split('/')[-1]
+      maps_h5_path = self.map_dir / (map_name + '.h5')
+      if maps_h5_path.is_file() and map_name != 'OpenDriveMap':
+        with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
+          parking = np.array(hf['parking'], dtype=np.uint16)
+          road = np.array(hf['road'], dtype=np.uint16)
           shoulder = np.array(hf['shoulder'], dtype=np.uint16)
-          full_road = np.clip((shoulder + parking + road), 0, 255).astype(dtype=np.uint8)
-        else:
-          full_road = np.clip((parking + road), 0, 255).astype(dtype=np.uint8)
+          lane_marking_all = np.array(hf['lane_marking_all'], dtype=np.uint8)
+          lane_marking_white_broken = np.array(hf['lane_marking_white_broken'], dtype=np.uint8)
+          self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
+          assert np.isclose(self.pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+      else:
+        map_masks = MapImage.draw_map_image(world_map, self.pixels_per_meter, precision=0.5)
+        parking = np.array(map_masks['parking'], dtype=np.uint16)
+        road = np.array(map_masks['road'], dtype=np.uint16)
+        shoulder = np.array(map_masks['shoulder'], dtype=np.uint16)
+        lane_marking_all = map_masks['lane_marking_all']
+        lane_marking_white_broken = map_masks['lane_marking_white_broken']
+        self._world_offset = np.array(map_masks['world_offset'], dtype=np.float32)
 
-        if self.config.use_shoulder_channel:
-          self.hd_map_array = np.stack(
-              (full_road, hf['lane_marking_all'], hf['lane_marking_white_broken'], hf['shoulder']), axis=2)
-        else:
-          self.hd_map_array = np.stack((full_road, hf['lane_marking_all'], hf['lane_marking_white_broken']), axis=2)
+      # Traffic islands are sometimes labelled as shoulder lanes.
+      if self.config.render_shoulder:
+        full_road = np.clip((shoulder + parking + road), 0, 255).astype(dtype=np.uint8)
+      else:
+        full_road = np.clip((parking + road), 0, 255).astype(dtype=np.uint8)
 
-        self.hd_map_array = self.hd_map_array.astype(dtype=np.uint8)
-
-        self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
-        assert np.isclose(self.pixels_per_meter, float(hf.attrs['pixels_per_meter']))
-
+      map_channels = [full_road, lane_marking_all, lane_marking_white_broken]
+      if self.config.use_shoulder_channel:
+        map_channels.append(shoulder)
+      self.hd_map_array = np.stack(map_channels, axis=2).astype(dtype=np.uint8)
       self.distance_threshold = np.ceil(self.width / self.pixels_per_meter)
 
-    # This for loop is slow ~100ms. During training, we optimize it away using the custom_leaderboard
-    try:
-      self.route_map = CarlaDataProvider.get_map_route()
-    except AttributeError:  # Original leaderboard doesn't have this function.
-      self.route_map = []
-      for route_point in route:
-        self.route_map.append(self.world_map.get_waypoint(route_point[0].location, project_to_road=True))
-
-    TrafficLightHandler.reset(self.world, self.world_map, self.route_map, self.config)
+    if not hasattr(self, 'route_map'):
+      try:
+        self.route_map = CarlaDataProvider.get_map_route()
+      except AttributeError:
+        self.route_map = [
+            self.world_map.get_waypoint(route_point[0].location, project_to_road=True) for route_point in route
+        ]
+      TrafficLightHandler.reset(self.world, self.world_map, self.route_map, self.config)
     self.total_num_route_points = len(route)
 
   @staticmethod

@@ -78,15 +78,16 @@ class MapImage(object):
     width_in_meters = max(max_x - min_x, max_y - min_y)
     width_in_pixels = round(pixels_per_meter_local * width_in_meters)
 
-    road_surface = np.zeros((width_in_pixels, width_in_pixels))
-    shoulder_surface = np.zeros((width_in_pixels, width_in_pixels))
-    parking_surface = np.zeros((width_in_pixels, width_in_pixels))
-    sidewalk_surface = np.zeros((width_in_pixels, width_in_pixels))
-    lane_marking_yellow_broken_surface = np.zeros((width_in_pixels, width_in_pixels))
-    lane_marking_yellow_solid_surface = np.zeros((width_in_pixels, width_in_pixels))
-    lane_marking_white_broken_surface = np.zeros((width_in_pixels, width_in_pixels))
-    lane_marking_white_solid_surface = np.zeros((width_in_pixels, width_in_pixels))
-    lane_marking_all_surface = np.zeros((width_in_pixels, width_in_pixels))
+    mask_shape = (width_in_pixels, width_in_pixels)
+    road_surface = np.zeros(mask_shape, dtype=np.uint8)
+    shoulder_surface = np.zeros(mask_shape, dtype=np.uint8)
+    parking_surface = np.zeros(mask_shape, dtype=np.uint8)
+    sidewalk_surface = np.zeros(mask_shape, dtype=np.uint8)
+    lane_marking_yellow_broken_surface = np.zeros(mask_shape, dtype=np.uint8)
+    lane_marking_yellow_solid_surface = np.zeros(mask_shape, dtype=np.uint8)
+    lane_marking_white_broken_surface = np.zeros(mask_shape, dtype=np.uint8)
+    lane_marking_white_solid_surface = np.zeros(mask_shape, dtype=np.uint8)
+    lane_marking_all_surface = np.zeros(mask_shape, dtype=np.uint8)
 
     topology = [x[0] for x in carla_map_local.get_topology()]
     topology = sorted(topology, key=lambda w: w.transform.location.z)
@@ -151,7 +152,7 @@ class MapImage(object):
                                                world_offset)
 
     # stoplines
-    stopline_surface = np.zeros((width_in_pixels, width_in_pixels))
+    stopline_surface = np.zeros(mask_shape, dtype=np.uint8)
 
     for stopline_vertices in TrafficLightHandler.list_stopline_vtx:
       for loc_left, loc_right in stopline_vertices:
