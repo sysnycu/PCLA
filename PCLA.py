@@ -5,6 +5,7 @@
 # Licensed under the Apache License, Version 2.0
 # https://www.apache.org/licenses/LICENSE-2.0
 
+import gc
 import importlib
 import logging
 import os
@@ -21,6 +22,7 @@ if os.path.exists(lmdrive_vision_encoder) and lmdrive_vision_encoder not in sys.
     sys.path.insert(0, lmdrive_vision_encoder)
 
 import carla
+import torch
 from pcla_functions import give_path, setup_sensor_attributes, location_to_waypoint, route_maker
 from leaderboard_codes.watchdog import Watchdog
 from leaderboard_codes.timer import GameTime
@@ -52,6 +54,8 @@ class PCLA():
         self.vehicle = vehicle
         self.routePath = route
         self._watchdog = Watchdog(260) # TODO: Increase timeout if needed for large models
+        CarlaDataProvider.set_client(self.client)
+        CarlaDataProvider.set_world(self.world)
         try:
             self.setup_agent(agent)
             self.setup_route()
@@ -77,11 +81,25 @@ class PCLA():
             sys.path.remove(module_dir)
         sys.path.insert(0, module_dir)
 
-        # Drop any previously loaded modules with common local names to avoid cross-agent contamination.
-        # Also clear 'models' package and all its submodules (models.bev_planner, models.lidar, etc.)
+        # Drop previously loaded local agent modules to avoid cross-agent contamination
+        # (e.g., plant2's dataset being reused by plant1).
+        module_names_to_clear = {
+            module_key,
+            'model', 'models', 'dataset', 'lit_module', 'plant_variables',
+            'nav_planner', 'config', 'transfuser', 'transfuser_utils',
+            'utils', 'util', 'data', 'gaussian_target',
+            'planner', 'controller', 'map_agent', 'base_agent',
+            'bev_planner', 'waypointer', 'lateral_controller',
+            'longitudinal_controller', 'kinematic_bicycle_model'
+        }
+        module_prefixes_to_clear = (
+            'models.',
+            'util.',
+            'carla_garage.',
+            'birds_eye_view.',
+        )
         for key in list(sys.modules.keys()):
-            if key in (module_key, 'model', 'models', 'nav_planner', 'config', 'transfuser', 'utils', 'planner', 
-                    'controller', 'map_agent', 'base_agent', 'bev_planner', 'waypointer') or key.startswith('models.'):
+            if key in module_names_to_clear or key == 'carla_garage' or key.startswith(module_prefixes_to_clear):
                 del sys.modules[key]
 
         try:
@@ -196,6 +214,7 @@ class PCLA():
             "_client",
             "_spawn_points",
             "_ego_vehicle_route",
+            "_grp",
         ):
             if hasattr(CarlaDataProvider, attribute):
                 setattr(CarlaDataProvider, attribute, None)
@@ -203,6 +222,12 @@ class PCLA():
             CarlaDataProvider._sync_flag = False
         if hasattr(CarlaDataProvider, "_spawn_index"):
             CarlaDataProvider._spawn_index = 0
+        if hasattr(CarlaDataProvider, "_runtime_init_flag"):
+            CarlaDataProvider._runtime_init_flag = False
+        if hasattr(CarlaDataProvider, "active_scenarios"):
+            CarlaDataProvider.active_scenarios = []
+        if hasattr(CarlaDataProvider, "last_scenario"):
+            CarlaDataProvider.last_scenario = None
     
     def cleanup(self):
         """Remove and destroy all actors."""
@@ -236,4 +261,12 @@ class PCLA():
         self.world = None
 
         self._clear_data_provider_state()
-        
+
+        # Release cached CUDA memory between agents to avoid cross-agent OOMs.
+        try:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
