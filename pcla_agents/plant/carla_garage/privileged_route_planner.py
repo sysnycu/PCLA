@@ -9,6 +9,68 @@ import carla
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from leaderboard_codes.local_planner import RoadOption
+import pathlib
+import xml.etree.ElementTree as ET
+
+
+def _quantize_speed_limit(speed_limit):
+  for category in (50.0, 80.0, 100.0, 120.0):
+    if speed_limit <= category:
+      return category
+  return 120.0
+
+
+def _opendrive_speed_limits(carla_map):
+  speed_limits = {}
+  try:
+    root = ET.fromstring(carla_map.to_opendrive())
+  except (AttributeError, ET.ParseError):
+    return speed_limits
+
+  unit_factors = {
+      "km/h": 1.0,
+      "kph": 1.0,
+      "mph": 1.609344,
+      "m/s": 3.6,
+  }
+  for road in root.findall("road"):
+    sections = []
+    for road_type in road.findall("type"):
+      speed = road_type.find("speed")
+      if speed is None:
+        continue
+      try:
+        value = float(speed.get("max"))
+        start = float(road_type.get("s", 0.0))
+      except (TypeError, ValueError):
+        continue
+      factor = unit_factors.get(speed.get("unit", "m/s").lower(), 1.0)
+      sections.append((start, _quantize_speed_limit(value * factor)))
+    if sections:
+      speed_limits[str(road.get("id"))] = sorted(sections)
+  return speed_limits
+
+
+def _route_speed_limits(carla_map, route_points, spacing):
+  road_speed_limits = _opendrive_speed_limits(carla_map)
+  speed_limits = np.empty(route_points.shape[0], dtype=float)
+  previous_speed_limit = 50.0
+
+  for i, loc in enumerate(route_points):
+    if i % spacing == 0:
+      waypoint = carla_map.get_waypoint(
+          carla.Location(x=float(loc[0]), y=float(loc[1]),
+                         z=float(loc[2]) if len(loc) > 2 else 0.0))
+      sections = road_speed_limits.get(str(waypoint.road_id), []) if waypoint is not None else []
+      current_speed_limit = 50.0
+      if sections:
+        applicable = [speed for start, speed in sections if start <= waypoint.s]
+        if applicable:
+          current_speed_limit = applicable[-1]
+      previous_speed_limit = current_speed_limit
+    speed_limits[i] = previous_speed_limit / 3.6
+
+  return speed_limits
 
 
 class PrivilegedRoutePlanner(object):
@@ -739,10 +801,17 @@ class PrivilegedRoutePlanner(object):
     # Get the name of the map
     map_name = carla_map.name.split("/")[-1]
 
-    # Load speed limit data from file - use path relative to this file's location
-    import os
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_name_speed_limits = os.path.join(current_dir, "speed_limits", f"{map_name}_speed_limits.npy")
+    # CARLA names every world generated from OpenDRIVE "OpenDriveMap", so a
+    # filename cache cannot distinguish maps supplied by different resets.
+    # Read speed definitions from the active map instead.
+    current_dir = pathlib.Path(__file__).parent
+    file_name_speed_limits = current_dir / "speed_limits" / f"{map_name}_speed_limits.npy"
+    if map_name == "OpenDriveMap" or not file_name_speed_limits.is_file():
+      self.speed_limits = _route_speed_limits(
+          carla_map, self.route_points, self.speed_limit_waypoints_spacing_check)
+      return
+
+    # Official CARLA towns use PCLA's precomputed speed-limit maps.
     file_content = np.load(file_name_speed_limits, allow_pickle=True)
     map_data = file_content.item()
 
