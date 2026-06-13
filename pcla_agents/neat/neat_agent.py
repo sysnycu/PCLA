@@ -87,15 +87,13 @@ class MultiTaskAgent(autonomous_agent.AutonomousAgent):
 
 	def _init(self):
 		self._route_planner = RoutePlanner(4.0, 50.0)
-		self._route_planner.set_route(self._global_plan, True)
+		self._route_planner.set_route_world(self._global_plan_world_coord)
 
 		self.initialized = True
 
 	def _get_position(self, tick_data):
-		gps = tick_data['gps']
-		gps = (gps - self._route_planner.mean) * self._route_planner.scale
-
-		return gps
+		location = self._vehicle.get_location()
+		return np.array([-location.y, location.x])
 
 	def sensors(self):
 		return [
@@ -196,6 +194,7 @@ class MultiTaskAgent(autonomous_agent.AutonomousAgent):
 
 	@torch.no_grad()
 	def run_step(self, input_data, timestamp, vehicle=None):
+		self._vehicle = vehicle
 		if not self.initialized:
 			self._init()
 
@@ -350,5 +349,4 @@ class MultiTaskAgent(autonomous_agent.AutonomousAgent):
 
 	def destroy(self):
 		del self.net
-
 
