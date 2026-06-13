@@ -11,6 +11,10 @@ import logging
 import os
 import sys
 
+# CaRL enables deterministic CUDA algorithms at import time. CuBLAS requires
+# this process-level setting before the first CUDA operation.
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+
 # Ensure imports work regardless of caller's working directory
 pcla_dir = os.path.dirname(os.path.abspath(__file__))
 if pcla_dir not in sys.path:
@@ -31,6 +35,20 @@ from leaderboard_codes.route_manipulation import interpolate_trajectory
 from leaderboard_codes.sensor_interface import CallBack, OpenDriveMapReader, SpeedometerReader
 
 logger = logging.getLogger(__name__)
+
+
+def _reset_torch_runtime_state():
+    """Restore process-global PyTorch settings before switching agents."""
+    try:
+        import torch
+    except ImportError:
+        return
+
+    torch.set_default_dtype(torch.float32)
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+
 
 class PCLA():
     def __init__(self, agent, vehicle, route, client, destroy_vehicle=False):
@@ -64,6 +82,7 @@ class PCLA():
             raise
 
     def setup_agent(self, agent):
+        _reset_torch_runtime_state()
         GameTime.restart()
         self._watchdog.start()
         self.agentPath, self.configPath = give_path(agent, self.current_dir, self.routePath)
@@ -265,6 +284,7 @@ class PCLA():
         try:
             import torch
 
+            _reset_torch_runtime_state()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
