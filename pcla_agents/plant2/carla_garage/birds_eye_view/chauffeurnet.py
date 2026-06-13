@@ -14,6 +14,7 @@ import os
 
 from .obs_manager import ObsManagerBase
 from .traffic_light import TrafficLightHandler
+from .birdview_map_opencv import MapImage
 
 COLOR_BLACK = (0, 0, 0)
 COLOR_RED = (255, 0, 0)
@@ -88,22 +89,32 @@ class ObsManager(ObsManagerBase):
     # splitting because for Town13 the name is 'Carla/Maps/Town13/Town13' instead of 'Town13'
     self._town = self._world.get_map().name.split('/')[-1]
     maps_h5_path = self._map_dir / (self._town + '.h5')
-    with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
-      self._road = np.array(hf['road'], dtype=np.uint8)
-      self._lane_marking_all = np.array(hf['lane_marking_all'], dtype=np.uint8)
-      self._lane_marking_white_broken = np.array(hf['lane_marking_white_broken'], dtype=np.uint8)
-      # self._shoulder = np.array(hf['shoulder'], dtype=np.uint8)
-      # self._parking = np.array(hf['parking'], dtype=np.uint8)
-      self._sidewalk = np.array(hf['sidewalk'], dtype=np.uint8)
-      # self._lane_marking_yellow_broken = np.array(hf['lane_marking_yellow_broken'], dtype=np.uint8)
-      # self._lane_marking_yellow_solid = np.array(hf['lane_marking_yellow_solid'], dtype=np.uint8)
-      # self._lane_marking_white_solid = np.array(hf['lane_marking_white_solid'], dtype=np.uint8)
+    TrafficLightHandler.reset(self._world)
+    if maps_h5_path.is_file() and self._town != "OpenDriveMap":
+      with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
+        self._road = np.array(hf['road'], dtype=np.uint8)
+        self._lane_marking_all = np.array(hf['lane_marking_all'], dtype=np.uint8)
+        self._lane_marking_white_broken = np.array(hf['lane_marking_white_broken'], dtype=np.uint8)
+        # self._shoulder = np.array(hf['shoulder'], dtype=np.uint8)
+        # self._parking = np.array(hf['parking'], dtype=np.uint8)
+        self._sidewalk = np.array(hf['sidewalk'], dtype=np.uint8)
+        # self._lane_marking_yellow_broken = np.array(hf['lane_marking_yellow_broken'], dtype=np.uint8)
+        # self._lane_marking_yellow_solid = np.array(hf['lane_marking_yellow_solid'], dtype=np.uint8)
+        # self._lane_marking_white_solid = np.array(hf['lane_marking_white_solid'], dtype=np.uint8)
 
-      self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
-      # in case they aren't close, print them to know what values they should be
-      if not np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter'])):
-        print(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
-      assert np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+        self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
+        # in case they aren't close, print them to know what values they should be
+        if not np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter'])):
+          print(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+        assert np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+    else:
+      map_masks = MapImage.draw_map_image(
+          self._world.get_map(), self._pixels_per_meter, precision=0.5)
+      self._road = map_masks['road']
+      self._lane_marking_all = map_masks['lane_marking_all']
+      self._lane_marking_white_broken = map_masks['lane_marking_white_broken']
+      self._sidewalk = map_masks['sidewalk']
+      self._world_offset = map_masks['world_offset']
 
     if self._town == "Town11":
       self._road = cv.resize(self._road, (0, 0), fx=0.5, fy=0.5, interpolation=cv.INTER_NEAREST)
@@ -118,8 +129,6 @@ class ObsManager(ObsManagerBase):
     # dilate road mask, lbc draw road polygon with 10px boarder
     # kernel = np.ones((11, 11), np.uint8)
     # self._road = cv.dilate(self._road, kernel, iterations=1)
-
-    TrafficLightHandler.reset(self._world)
 
   @staticmethod
   def _get_stops(criteria_stop):
