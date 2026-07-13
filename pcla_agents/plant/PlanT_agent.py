@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 from pathlib import Path
 import yaml
 import time
@@ -41,6 +42,21 @@ logger = logging.getLogger(__name__)
 def get_entry_point():
     return 'PlanTAgent'
 
+
+def _initial_control_delay_steps(delay_seconds, frame_rate):
+    if isinstance(delay_seconds, bool):
+        raise ValueError("initial_control_delay_seconds must be a non-negative number")
+    try:
+        delay_seconds = float(delay_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "initial_control_delay_seconds must be a non-negative number"
+        ) from exc
+    if not math.isfinite(delay_seconds) or delay_seconds < 0.0:
+        raise ValueError("initial_control_delay_seconds must be a non-negative number")
+    return delay_seconds, math.ceil(delay_seconds / frame_rate)
+
+
 class PlanTAgent(autonomous_agent.AutonomousAgent):
 
     def set_global_plan(self, global_plan_gps, global_plan_world_coord):
@@ -72,6 +88,13 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
             cfg = yaml.safe_load(f)
 
         self.visualize = cfg["visualize"]
+        initial_control_delay_seconds = cfg.get("initial_control_delay_seconds", 0.0)
+        self.initial_control_delay_seconds, self.initial_control_delay_steps = (
+            _initial_control_delay_steps(
+                initial_control_delay_seconds,
+                self.config.carla_frame_rate,
+            )
+        )
         self.viz_path = os.path.join(cfg["viz_path"], time.strftime("%Y_%m_%d-%H:%M:%S"))
         os.makedirs(self.viz_path, exist_ok=True)
         LOAD_CKPT_PATH = cfg["checkpoint"]
@@ -227,9 +250,11 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
 
         self.control = self._get_control(boxes, tick_data)
 
-        inital_frames_delay = 40
-        if self.step < inital_frames_delay:
-            self.control = carla.VehicleControl(0.0, 0.0, 1.0)
+        # Some CARLA Leaderboard setups need a short startup delay before
+        # controls take effect reliably. Keep it disabled for PISA scenarios
+        # with a non-zero initial ego speed unless explicitly configured.
+        if self.step <= self.initial_control_delay_steps:
+            self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
 
         return self.control
 
