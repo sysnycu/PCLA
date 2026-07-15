@@ -1,5 +1,4 @@
 import os
-import logging
 import math
 from pathlib import Path
 import yaml
@@ -35,9 +34,6 @@ from carla_garage.config import GlobalConfig
 from leaderboard_codes.route_manipulation import downsample_route
 
 from util.viz_batch import viz_batch
-
-logger = logging.getLogger(__name__)
-
 
 def get_entry_point():
     return 'PlanTAgent'
@@ -447,34 +443,6 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
 
         input_batch["waypoints"] = pred_wp.detach()
 
-        if self.step <= 3 or self.step in (39, 40, 41) or self.step % 20 == 0:
-            route_boxes = [
-                [round(value, 3) for value in box]
-                for box in boxes
-                if int(box[0]) == 2
-            ]
-            actor_boxes = [
-                [round(value, 3) for value in box]
-                for box in boxes
-                if int(box[0]) != 2
-            ]
-            logger.info(
-                "PlanT state step=%d gps=%s raw_compass=%.6f yaw=%.6f "
-                "route_head=%s route_target=%s local_target=%s speed=%.3f "
-                "route_boxes=%s actor_boxes=%s pred_wp=%s",
-                self.step,
-                np.asarray(input_data['gps']).round(3).tolist(),
-                input_data['raw_compass'],
-                input_data['yaw'],
-                input_data['route_head'],
-                input_data['route_target'],
-                tuple(round(value, 3) for value in input_data['target_point']),
-                input_data['speed'],
-                route_boxes,
-                actor_boxes,
-                pred_wp.detach().cpu().squeeze().numpy().round(3).tolist(),
-            )
-        
         if self.step%25==0 and self.visualize:
             img = viz_batch(input_batch, rgb=input_data["rgb"])
             cv2.imwrite(f"{self.viz_path}/{GameTime.get_frame()}.png", img)

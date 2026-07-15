@@ -41,6 +41,38 @@ def tint(color, factor):
   return (r, g, b)
 
 
+def warp_affine_local_crop(image, transform, output_width):
+  """Warp only the source ROI that contributes to the square BEV output.
+
+  OpenDRIVE maps are rasterized into a square whose side is the map's longest
+  dimension. A long, narrow road can therefore produce a huge mostly-empty
+  source image. Cropping the inverse-projected output footprint before calling
+  OpenCV preserves the affine result while avoiding its large-image slow path.
+  """
+  output_corners = np.array(
+      [[[0.0, 0.0]], [[output_width - 1.0, 0.0]],
+       [[output_width - 1.0, output_width - 1.0]], [[0.0, output_width - 1.0]]],
+      dtype=np.float32)
+  inverse_transform = cv.invertAffineTransform(transform)
+  source_corners = cv.transform(output_corners, inverse_transform).reshape(-1, 2)
+
+  # INTER_LINEAR can read one pixel outside the exact footprint. Keep two
+  # pixels of padding so border behavior matches warping the complete map.
+  padding = 2
+  x0 = max(0, int(np.floor(source_corners[:, 0].min())) - padding)
+  y0 = max(0, int(np.floor(source_corners[:, 1].min())) - padding)
+  x1 = min(image.shape[1], int(np.ceil(source_corners[:, 0].max())) + padding + 1)
+  y1 = min(image.shape[0], int(np.ceil(source_corners[:, 1].max())) + padding + 1)
+
+  if x0 >= x1 or y0 >= y1:
+    return np.zeros((output_width, output_width, image.shape[2]), dtype=image.dtype)
+
+  cropped = np.ascontiguousarray(image[y0:y1, x0:x1])
+  local_transform = transform.copy()
+  local_transform[:, 2] += local_transform[:, 0] * x0 + local_transform[:, 1] * y0
+  return cv.warpAffine(cropped, local_transform, (output_width, output_width))
+
+
 class ObsManager(ObsManagerBase):
   """
   Generates bev semantic segmentation maps.
@@ -197,7 +229,7 @@ class ObsManager(ObsManagerBase):
     # road_mask, lane_mask 0.3 - 0.5 ms
     # Batched together for higher efficiency.
 
-    warped_hd_map = cv.warpAffine(self.hd_map_array, m_warp, (self._width, self._width))
+    warped_hd_map = warp_affine_local_crop(self.hd_map_array, m_warp, self._width)
     lane_mask_broken = warped_hd_map[:, :, 2].astype(bool)
 
     # 0.1 ms

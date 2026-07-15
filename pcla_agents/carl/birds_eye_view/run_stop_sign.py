@@ -26,12 +26,15 @@ class RunStopSign:
     self.world = carla_world
     self.carla_map = carla_map
     self.list_stop_signs = []
+    self.stop_sign_locations = []
     self.target_stop_sign = None
     self.stop_completed = False
 
     for actor in self.world.get_actors():
       if 'traffic.stop' in actor.type_id:
         self.list_stop_signs.append(actor)
+        stop_location = actor.get_transform().transform(actor.trigger_volume.location)
+        self.stop_sign_locations.append(stop_location)
 
   def point_inside_boundingbox(self, point, bb_center, bb_extent, multiplier=1.2):
     """Checks whether a point is inside a bounding box."""
@@ -114,7 +117,20 @@ class RunStopSign:
     """
     Check if the actor is running a red light
     """
+    # get_waypoints() calls Waypoint.next() up to 100 times. Those calls are
+    # CARLA RPCs and dominate run_step on generated OpenDRIVE maps. The
+    # original scan rejects every sign farther than PROXIMITY_THRESHOLD, so
+    # applying the same distance check before generating waypoints preserves
+    # behavior while avoiding the RPC loop when there is no relevant sign.
+    if not self.list_stop_signs:
+      return
+
     actor_transform = vehicle.get_transform()
+    if not self.target_stop_sign and all(
+        stop_location.distance(actor_transform.location) > self.PROXIMITY_THRESHOLD
+        for stop_location in self.stop_sign_locations):
+      return
+
     check_wps = self.get_waypoints(vehicle)
     actor_velocity = vehicle.get_velocity()
 
