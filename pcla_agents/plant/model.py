@@ -1,4 +1,6 @@
 import logging
+import os
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -32,9 +34,16 @@ class HFLM(nn.Module):
         self.vocab_size = [2**i for i in precisions]
 
         # model
+        checkpoint_path = os.environ.get("PLANT_CHECKPOINT")
+        hf_config_path = (
+            Path(checkpoint_path).parent
+            if checkpoint_path
+            else self.config_net.hf_checkpoint
+        )
         config = AutoConfig.from_pretrained(
-            self.config_net.hf_checkpoint
-        )  # load config from hugging face model
+            hf_config_path,
+            local_files_only=bool(checkpoint_path),
+        )
         n_embd = config.hidden_size
         self.model = AutoModel.from_config(config=config)
 

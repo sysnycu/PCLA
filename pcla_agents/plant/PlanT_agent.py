@@ -121,6 +121,10 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
                 "/opt/pcla-pretrained:ro or set PCLA_PRETRAINED_ROOT."
             )
 
+        # Let the model load its Hugging Face architecture config from the
+        # mounted weight directory instead of requiring network access.
+        os.environ["PLANT_CHECKPOINT"] = LOAD_CKPT_PATH
+
         print(f'Loading model from {LOAD_CKPT_PATH}')
 
         if Path(LOAD_CKPT_PATH).suffix == '.ckpt':
