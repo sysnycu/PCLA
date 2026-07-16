@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 
 from transformers import (
-    AutoConfig,
     AutoModel,
+    BertConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class HFLM(nn.Module):
             if checkpoint_path
             else self.config_net.hf_checkpoint
         )
-        config = AutoConfig.from_pretrained(
+        config = BertConfig.from_pretrained(
             hf_config_path,
             local_files_only=bool(checkpoint_path),
         )
