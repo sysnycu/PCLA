@@ -11,6 +11,7 @@ from pathlib import Path
 import h5py
 
 from birds_eye_view.obs_manager import ObsManagerBase
+from birds_eye_view.birdview_map_opencv import MapImage
 from birds_eye_view.traffic_light import TrafficLightHandler
 
 COLOR_BLACK = (0, 0, 0)
@@ -38,6 +39,38 @@ def tint(color, factor):
   g = min(g, 255)
   b = min(b, 255)
   return (r, g, b)
+
+
+def warp_affine_local_crop(image, transform, output_width):
+  """Warp only the source ROI that contributes to the square BEV output.
+
+  OpenDRIVE maps are rasterized into a square whose side is the map's longest
+  dimension. A long, narrow road can therefore produce a huge mostly-empty
+  source image. Cropping the inverse-projected output footprint before calling
+  OpenCV preserves the affine result while avoiding its large-image slow path.
+  """
+  output_corners = np.array(
+      [[[0.0, 0.0]], [[output_width - 1.0, 0.0]],
+       [[output_width - 1.0, output_width - 1.0]], [[0.0, output_width - 1.0]]],
+      dtype=np.float32)
+  inverse_transform = cv.invertAffineTransform(transform)
+  source_corners = cv.transform(output_corners, inverse_transform).reshape(-1, 2)
+
+  # INTER_LINEAR can read one pixel outside the exact footprint. Keep two
+  # pixels of padding so border behavior matches warping the complete map.
+  padding = 2
+  x0 = max(0, int(np.floor(source_corners[:, 0].min())) - padding)
+  y0 = max(0, int(np.floor(source_corners[:, 1].min())) - padding)
+  x1 = min(image.shape[1], int(np.ceil(source_corners[:, 0].max())) + padding + 1)
+  y1 = min(image.shape[0], int(np.ceil(source_corners[:, 1].max())) + padding + 1)
+
+  if x0 >= x1 or y0 >= y1:
+    return np.zeros((output_width, output_width, image.shape[2]), dtype=image.dtype)
+
+  cropped = np.ascontiguousarray(image[y0:y1, x0:x1])
+  local_transform = transform.copy()
+  local_transform[:, 2] += local_transform[:, 0] * x0 + local_transform[:, 1] * y0
+  return cv.warpAffine(cropped, local_transform, (output_width, output_width))
 
 
 class ObsManager(ObsManagerBase):
@@ -76,29 +109,36 @@ class ObsManager(ObsManagerBase):
     if self._world is None or current_world.id != self._world.id:
       self._world = current_world
 
-      maps_h5_path = self._map_dir / (world_map.name.rsplit('/', 1)[1] + '.h5')
-      with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
-        self.hd_map_array = np.stack((hf['road'], hf['lane_marking_all'], hf['lane_marking_white_broken']), axis=2)
-        self.hd_map_array = self.hd_map_array.astype(dtype=np.uint8)
-        # self._road = np.array(hf['road'], dtype=np.uint8)
-        # self._lane_marking_all = np.array(hf['lane_marking_all'], dtype=np.uint8)
-        # self._lane_marking_white_broken = np.array(hf['lane_marking_white_broken'], dtype=np.uint8)
-        # self._shoulder = np.array(hf['shoulder'], dtype=np.uint8)
-        # self._parking = np.array(hf['parking'], dtype=np.uint8)
-        # self._sidewalk = np.array(hf['sidewalk'], dtype=np.uint8)
-        # self._lane_marking_yellow_broken = np.array(hf['lane_marking_yellow_broken'], dtype=np.uint8)
-        # self._lane_marking_yellow_solid = np.array(hf['lane_marking_yellow_solid'], dtype=np.uint8)
-        # self._lane_marking_white_solid = np.array(hf['lane_marking_white_solid'], dtype=np.uint8)
+      TrafficLightHandler.reset(self._world, world_map)
+      map_name = world_map.name.split('/')[-1]
+      maps_h5_path = self._map_dir / (map_name + '.h5')
+      if maps_h5_path.is_file() and map_name != 'OpenDriveMap':
+        with h5py.File(maps_h5_path, 'r', libver='latest', swmr=True) as hf:
+          map_channels = (
+              np.array(hf['road'], dtype=np.uint8),
+              np.array(hf['lane_marking_all'], dtype=np.uint8),
+              np.array(hf['lane_marking_white_broken'], dtype=np.uint8),
+          )
+          self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
+          assert np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+      else:
+        map_masks = MapImage.draw_map_image(world_map, self._pixels_per_meter, precision=0.5)
+        map_channels = (
+            map_masks['road'],
+            map_masks['lane_marking_all'],
+            map_masks['lane_marking_white_broken'],
+        )
+        self._world_offset = np.array(map_masks['world_offset'], dtype=np.float32)
 
-        self._world_offset = np.array(hf.attrs['world_offset_in_meters'], dtype=np.float32)
-        assert np.isclose(self._pixels_per_meter, float(hf.attrs['pixels_per_meter']))
+      self.hd_map_array = np.stack(map_channels, axis=2).astype(dtype=np.uint8)
 
       self._distance_threshold = np.ceil(self._width / self._pixels_per_meter)
     # dilate road mask, lbc draw road polygon with 10px boarder
     # kernel = np.ones((11, 11), np.uint8)
     # self._road = cv.dilate(self._road, kernel, iterations=1)
 
-    TrafficLightHandler.reset(self._world, world_map)
+    if TrafficLightHandler.carla_map is not world_map:
+      TrafficLightHandler.reset(self._world, world_map)
 
   @staticmethod
   def _get_stops(criteria_stop):
@@ -189,7 +229,7 @@ class ObsManager(ObsManagerBase):
     # road_mask, lane_mask 0.3 - 0.5 ms
     # Batched together for higher efficiency.
 
-    warped_hd_map = cv.warpAffine(self.hd_map_array, m_warp, (self._width, self._width))
+    warped_hd_map = warp_affine_local_crop(self.hd_map_array, m_warp, self._width)
     lane_mask_broken = warped_hd_map[:, :, 2].astype(bool)
 
     # 0.1 ms

@@ -505,6 +505,13 @@ class EvalAgent(autonomous_agent.AutonomousAgent):
     The leaderboard client doesn't properly clear up the agent after the route finishes so we need to do it here.
     Also writes logging files to disk.
     """
+    if not self.initialized:
+      if self.cpp and hasattr(self, 'socket'):
+        self.socket.send_string('Shutdown')
+        self.socket.close()
+        self.context.term()
+      return
+
     waypoint_route = self.get_waypoint_route()
     _, collision_with_pedestrian, perc_off_road = self.preprocess_observation(waypoint_route, self.last_timestamp)
     _, termination, _, info = self.reward_handler.get(self.last_timestamp, waypoint_route, collision_with_pedestrian,

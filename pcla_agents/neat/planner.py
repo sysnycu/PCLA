@@ -63,6 +63,18 @@ class RoutePlanner(object):
 
             self.route.append((pos, cmd))
 
+    def set_route_world(self, global_plan):
+        """Set a CARLA world route in NEAT's native navigation frame."""
+        self.route.clear()
+
+        for transform, cmd in global_plan:
+            location = transform.location
+            # NEAT was trained with GPS ordered as [lat, lon], which maps to
+            # CARLA world coordinates as [-y, x]. Keep that convention while
+            # avoiding map-dependent georeference and scale approximations.
+            pos = np.array([-location.y, location.x])
+            self.route.append((pos, cmd))
+
     def run_step(self, gps):
         self.debug.clear()
 

@@ -1,4 +1,5 @@
 import os
+import math
 from pathlib import Path
 import yaml
 import time
@@ -37,6 +38,21 @@ from util.viz_batch import viz_batch
 def get_entry_point():
     return 'PlanTAgent'
 
+
+def _initial_control_delay_steps(delay_seconds, frame_rate):
+    if isinstance(delay_seconds, bool):
+        raise ValueError("initial_control_delay_seconds must be a non-negative number")
+    try:
+        delay_seconds = float(delay_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "initial_control_delay_seconds must be a non-negative number"
+        ) from exc
+    if not math.isfinite(delay_seconds) or delay_seconds < 0.0:
+        raise ValueError("initial_control_delay_seconds must be a non-negative number")
+    return delay_seconds, math.ceil(delay_seconds / frame_rate)
+
+
 class PlanTAgent(autonomous_agent.AutonomousAgent):
 
     def set_global_plan(self, global_plan_gps, global_plan_world_coord):
@@ -45,7 +61,10 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         """
         self.org_dense_route_gps = global_plan_gps
         self.org_dense_route_world_coord = global_plan_world_coord
-        ds_ids = downsample_route(global_plan_world_coord, 200)
+        # Keep command points within the range used by the common leaderboard
+        # agent. A 200 m interval collapses short PISA routes to only their
+        # endpoints and sends PlanT an out-of-distribution target point.
+        ds_ids = downsample_route(global_plan_world_coord, 50)
         self._global_plan_world_coord = [(global_plan_world_coord[x][0], global_plan_world_coord[x][1]) for x in ds_ids]
         self._global_plan = [global_plan_gps[x] for x in ds_ids]
 
@@ -65,15 +84,46 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
             cfg = yaml.safe_load(f)
 
         self.visualize = cfg["visualize"]
+        initial_control_delay_seconds = cfg.get("initial_control_delay_seconds", 0.0)
+        self.initial_control_delay_seconds, self.initial_control_delay_steps = (
+            _initial_control_delay_steps(
+                initial_control_delay_seconds,
+                self.config.carla_frame_rate,
+            )
+        )
         self.viz_path = os.path.join(cfg["viz_path"], time.strftime("%Y_%m_%d-%H:%M:%S"))
         os.makedirs(self.viz_path, exist_ok=True)
         LOAD_CKPT_PATH = cfg["checkpoint"]
-        
-        # Make the checkpoint path relative to the PCLA directory, not the current working directory
+
+        checkpoint_candidates = []
         if not os.path.isabs(LOAD_CKPT_PATH):
-            # Get the PCLA root directory (where PCLA.py is located)
             pcla_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            LOAD_CKPT_PATH = os.path.join(pcla_root, LOAD_CKPT_PATH)
+            checkpoint_candidates.append(os.path.join(pcla_root, LOAD_CKPT_PATH))
+
+            pretrained_root = os.environ.get("PCLA_PRETRAINED_ROOT")
+            path_parts = Path(LOAD_CKPT_PATH).parts
+            if pretrained_root and len(path_parts) >= 3 and path_parts[0] == "pcla_agents":
+                checkpoint_candidates.append(
+                    os.path.join(pretrained_root, *path_parts[1:])
+                )
+        else:
+            checkpoint_candidates.append(LOAD_CKPT_PATH)
+
+        LOAD_CKPT_PATH = next(
+            (path for path in checkpoint_candidates if os.path.isfile(path)),
+            checkpoint_candidates[0],
+        )
+        if not os.path.isfile(LOAD_CKPT_PATH):
+            checked_paths = ", ".join(checkpoint_candidates)
+            raise FileNotFoundError(
+                f"PlanT checkpoint not found. Checked: {checked_paths}. "
+                "Mount the official pcla_agents directory at "
+                "/opt/pcla-pretrained:ro or set PCLA_PRETRAINED_ROOT."
+            )
+
+        # Let the model load its Hugging Face architecture config from the
+        # mounted weight directory instead of requiring network access.
+        os.environ["PLANT_CHECKPOINT"] = LOAD_CKPT_PATH
 
         print(f'Loading model from {LOAD_CKPT_PATH}')
 
@@ -89,7 +139,11 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
 
     def _init(self, hd_map, vehicle):
         self._route_planner = RoutePlanner(7.5, 50.0)
-        self._route_planner.set_route(self._global_plan, True)
+        # PCLA already provides the interpolated route in CARLA world
+        # coordinates. Using the GPS plan here requires matching lat/lon
+        # references, but generated OpenDRIVE maps may not expose +lat_0 and
+        # +lon_0. Avoid that lossy round-trip and plan directly in world space.
+        self._route_planner.set_route(self._global_plan_world_coord, False)
 
         # Get the hero vehicle and the CARLA world
         self._vehicle = vehicle
@@ -175,6 +229,11 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         ego_target_point = t_u.inverse_conversion_2d(target_point[:2], result['gps'], compass)
 
         result['target_point'] = tuple(ego_target_point)
+        result['raw_compass'] = float(input_data['imu'][1][-1])
+        result['route_target'] = tuple(np.asarray(target_point[:2], dtype=float))
+        result['route_head'] = [
+            tuple(np.asarray(point[0][:2], dtype=float)) for point in list(waypoint_route)[:2]
+        ]
 
         return result
 
@@ -191,9 +250,11 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
 
         self.control = self._get_control(boxes, tick_data)
 
-        inital_frames_delay = 40
-        if self.step < inital_frames_delay:
-            self.control = carla.VehicleControl(0.0, 0.0, 1.0)
+        # Some CARLA Leaderboard setups need a short startup delay before
+        # controls take effect reliably. Keep it disabled for PISA scenarios
+        # with a non-zero initial ego speed unless explicitly configured.
+        if self.step <= self.initial_control_delay_steps:
+            self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
 
         return self.control
 
@@ -385,7 +446,7 @@ class PlanTAgent(autonomous_agent.AutonomousAgent):
         pred_wp = self.net(input_batch)[2]
 
         input_batch["waypoints"] = pred_wp.detach()
-        
+
         if self.step%25==0 and self.visualize:
             img = viz_batch(input_batch, rgb=input_data["rgb"])
             cv2.imwrite(f"{self.viz_path}/{GameTime.get_frame()}.png", img)

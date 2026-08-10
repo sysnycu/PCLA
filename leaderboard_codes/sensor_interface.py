@@ -23,6 +23,12 @@ def threaded(fn):
     return wrapper
 
 
+def _measurement_due(current_time, latest_time, reading_frequency):
+    """Return whether a periodic pseudo-sensor is due at simulation time."""
+    period = 1.0 / reading_frequency
+    return current_time - latest_time >= period - 1e-9
+
+
 class SensorConfigurationInvalid(Exception):
     """
     Exceptions thrown when the sensors used by the agent are not allowed for that specific submissions
@@ -67,7 +73,7 @@ class BaseReader(object):
                 current_time = GameTime.get_time()
 
                 # Second part forces the sensors to send data at the first tick, regardless of frequency
-                if current_time - latest_time > (1 / self._reading_frequency) \
+                if _measurement_due(current_time, latest_time, self._reading_frequency) \
                         or (first_time and GameTime.get_frame() != 0):
                     self._callback(GenericMeasurement(self.__call__(), GameTime.get_frame()))
                     latest_time = GameTime.get_time()
@@ -198,12 +204,15 @@ class CallBack(object):
 class SensorInterface(object):
     def __init__(self):
         self._sensors_objects = {}
+        self._sensor_types = {}
         self._data_buffers = {}
         self._new_data_buffers = Queue()
         self._queue_timeout = 10
 
         # Only sensor that doesn't get the data on tick, needs special treatment
         self._opendrive_tag = None
+        self._observation_proxy = None
+        self._observation_proxy_vehicle = None
 
 
     def register_sensor(self, tag, sensor_type, sensor):
@@ -211,6 +220,7 @@ class SensorInterface(object):
             raise SensorConfigurationInvalid("Duplicated sensor tag [{}]".format(tag))
 
         self._sensors_objects[tag] = sensor
+        self._sensor_types[tag] = sensor_type
 
         if sensor_type == 'sensor.opendrive_map': 
             self._opendrive_tag = tag
@@ -221,6 +231,11 @@ class SensorInterface(object):
             raise SensorConfigurationInvalid("The sensor with tag [{}] has not been created!".format(tag))
 
         self._new_data_buffers.put((tag, timestamp, data))
+
+    def set_observation_proxy(self, registry, vehicle):
+        """Install a decision-context observation proxy without changing callbacks."""
+        self._observation_proxy = registry
+        self._observation_proxy_vehicle = vehicle
 
     def get_data(self):
         try: 
@@ -239,5 +254,12 @@ class SensorInterface(object):
 
         except Empty:
             raise SensorReceivedNoData("A sensor took too long to send their data")
+
+        if self._observation_proxy is not None:
+            return self._observation_proxy.override_sensor_data(
+                data_dict,
+                self._sensor_types,
+                self._observation_proxy_vehicle,
+            )
 
         return data_dict

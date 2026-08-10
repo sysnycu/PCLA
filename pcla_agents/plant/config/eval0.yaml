@@ -1,4 +1,5 @@
 checkpoint: pcla_agents/plant_pretrained/last.ckpt
+initial_control_delay_seconds: 0.0
 
-visualize: True
+visualize: False
 viz_path: plant_viz
