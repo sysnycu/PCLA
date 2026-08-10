@@ -63,6 +63,7 @@ class PCLA():
         self._watchdog = None
         self._sensors = []
         self._destroy_vehicle = destroy_vehicle
+        self._observation_proxy = None
         self.set(agent, vehicle, route, client)
     
     def set(self, agent, vehicle, route, client):
@@ -184,7 +185,24 @@ class PCLA():
             timestamp = snapshot.timestamp
         if timestamp:
             GameTime.on_carla_tick(timestamp)
-            return self.agent_instance(vehicle = self.vehicle)
+            decision_vehicle = self.vehicle
+            if getattr(self, "_observation_proxy", None) is not None:
+                decision_vehicle = self._observation_proxy.proxy_for_actor(
+                    self.vehicle,
+                    world=self.world,
+                )
+            return self.agent_instance(vehicle=decision_vehicle)
+
+    def configure_observation_proxy(self, registry):
+        """Install observation-first reads for the agent decision boundary only."""
+        self._observation_proxy = registry
+        setter = getattr(CarlaDataProvider, "set_observation_registry", None)
+        if callable(setter):
+            setter(registry, world=self.world)
+        sensor_interface = getattr(self.agent_instance, "sensor_interface", None)
+        setter = getattr(sensor_interface, "set_observation_proxy", None)
+        if callable(setter):
+            setter(registry, self.vehicle)
 
     def done(self):
         if self.agent_instance is None:
@@ -218,6 +236,7 @@ class PCLA():
             "_actor_velocity_map",
             "_actor_location_map",
             "_actor_transform_map",
+            "_actor_refs",
             "_traffic_light_map",
             "_carla_actor_pool",
             "_vehicles_with_open_doors",
@@ -242,6 +261,8 @@ class PCLA():
             CarlaDataProvider._spawn_index = 0
         if hasattr(CarlaDataProvider, "_runtime_init_flag"):
             CarlaDataProvider._runtime_init_flag = False
+        if hasattr(CarlaDataProvider, "_observation_registry"):
+            CarlaDataProvider._observation_registry = None
         if hasattr(CarlaDataProvider, "active_scenarios"):
             CarlaDataProvider.active_scenarios = []
         if hasattr(CarlaDataProvider, "last_scenario"):
@@ -262,6 +283,12 @@ class PCLA():
             logger.exception("Failed to stop the PCLA agent")
 
         self._cleanup_sensors()
+
+        if getattr(self, "_observation_proxy", None) is not None:
+            clearer = getattr(CarlaDataProvider, "clear_observation_registry", None)
+            if callable(clearer):
+                clearer(self._observation_proxy)
+            self._observation_proxy = None
 
         if self._destroy_vehicle:
             try:

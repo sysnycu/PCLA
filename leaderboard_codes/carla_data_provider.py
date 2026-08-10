@@ -57,6 +57,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     _actor_velocity_map = dict()
     _actor_location_map = dict()
     _actor_transform_map = dict()
+    _actor_refs = dict()
     _traffic_light_map = dict()
     _carla_actor_pool = dict()
     _vehicles_with_open_doors = {}
@@ -79,6 +80,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     _grp = None
     _runtime_init_flag = False
     _lock = threading.Lock()
+    _observation_registry = None
 
     @staticmethod
     def register_actor(actor):
@@ -86,23 +88,25 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         Add new actor to dictionaries
         If actor already exists, throw an exception
         """
-        if actor in CarlaDataProvider._actor_velocity_map:
+        actor_id = int(actor.id)
+        if actor_id in CarlaDataProvider._actor_velocity_map:
             raise KeyError(
                 "Vehicle '{}' already registered. Cannot register twice!".format(actor.id))
         else:
-            CarlaDataProvider._actor_velocity_map[actor] = 0.0
+            CarlaDataProvider._actor_velocity_map[actor_id] = 0.0
 
-        if actor in CarlaDataProvider._actor_location_map:
+        if actor_id in CarlaDataProvider._actor_location_map:
             raise KeyError(
                 "Vehicle '{}' already registered. Cannot register twice!".format(actor.id))
         else:
-            CarlaDataProvider._actor_location_map[actor] = None
+            CarlaDataProvider._actor_location_map[actor_id] = None
 
-        if actor in CarlaDataProvider._actor_transform_map:
+        if actor_id in CarlaDataProvider._actor_transform_map:
             raise KeyError(
                 "Vehicle '{}' already registered. Cannot register twice!".format(actor.id))
         else:
-            CarlaDataProvider._actor_transform_map[actor] = None
+            CarlaDataProvider._actor_transform_map[actor_id] = None
+        CarlaDataProvider._actor_refs[actor_id] = actor
 
     @staticmethod
     def register_actors(actors):
@@ -117,17 +121,20 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         Callback from CARLA
         """
-        for actor in CarlaDataProvider._actor_velocity_map:
+        for actor_id in CarlaDataProvider._actor_velocity_map:
+            actor = CarlaDataProvider._actor_refs.get(actor_id)
             if actor is not None and actor.is_alive:
-                CarlaDataProvider._actor_velocity_map[actor] = calculate_velocity(actor)
+                CarlaDataProvider._actor_velocity_map[actor_id] = calculate_velocity(actor)
 
-        for actor in CarlaDataProvider._actor_location_map:
+        for actor_id in CarlaDataProvider._actor_location_map:
+            actor = CarlaDataProvider._actor_refs.get(actor_id)
             if actor is not None and actor.is_alive:
-                CarlaDataProvider._actor_location_map[actor] = actor.get_location()
+                CarlaDataProvider._actor_location_map[actor_id] = actor.get_location()
 
-        for actor in CarlaDataProvider._actor_transform_map:
+        for actor_id in CarlaDataProvider._actor_transform_map:
+            actor = CarlaDataProvider._actor_refs.get(actor_id)
             if actor is not None and actor.is_alive:
-                CarlaDataProvider._actor_transform_map[actor] = actor.get_transform()
+                CarlaDataProvider._actor_transform_map[actor_id] = actor.get_transform()
 
         world = CarlaDataProvider._world
         if world is None:
@@ -140,20 +147,32 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         returns the absolute velocity for the given actor
         """
-        for key in CarlaDataProvider._actor_velocity_map:
-            if key.id == actor.id:
-                return CarlaDataProvider._actor_velocity_map[key]
-
-        raise KeyError('{}.get_velocity: {} not found!'.format(__name__, actor))
+        actor_id = int(actor.id)
+        registry = CarlaDataProvider._observation_registry
+        if actor_id not in CarlaDataProvider._actor_velocity_map:
+            if registry is not None:
+                return registry.provider_value(actor, "velocity", None)
+            raise KeyError('{}.get_velocity: {} not found!'.format(__name__, actor))
+        value = CarlaDataProvider._actor_velocity_map[actor_id]
+        if registry is not None:
+            return registry.provider_value(actor, "velocity", value)
+        return value
 
     @staticmethod
     def get_location(actor):
         """
         returns the location for the given actor
         """
-        for key in CarlaDataProvider._actor_location_map:
-            if key.id == actor.id:
-                return CarlaDataProvider._actor_location_map[key]
+        actor_id = int(actor.id)
+        registry = CarlaDataProvider._observation_registry
+        if actor_id in CarlaDataProvider._actor_location_map:
+            value = CarlaDataProvider._actor_location_map[actor_id]
+            if registry is not None:
+                return registry.provider_value(actor, "location", value)
+            return value
+
+        if registry is not None:
+            return registry.provider_value(actor, "location", None)
 
         # We are intentionally not throwing here
         # This may cause exception loops in py_trees
@@ -165,9 +184,16 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         returns the transform for the given actor
         """
-        for key in CarlaDataProvider._actor_transform_map:
-            if key.id == actor.id:
-                return CarlaDataProvider._actor_transform_map[key]
+        actor_id = int(actor.id)
+        registry = CarlaDataProvider._observation_registry
+        if actor_id in CarlaDataProvider._actor_transform_map:
+            value = CarlaDataProvider._actor_transform_map[actor_id]
+            if registry is not None:
+                return registry.provider_value(actor, "transform", value)
+            return value
+
+        if registry is not None:
+            return registry.provider_value(actor, "transform", None)
 
         # We are intentionally not throwing here
         # This may cause exception loops in py_trees
@@ -180,6 +206,19 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         Set the CARLA client
         """
         CarlaDataProvider._client = client
+
+    @staticmethod
+    def set_observation_registry(registry, world=None):
+        CarlaDataProvider._observation_registry = registry
+        if registry is not None and world is not None:
+            setter = getattr(registry, "set_native_world", None)
+            if callable(setter):
+                setter(world)
+
+    @staticmethod
+    def clear_observation_registry(registry=None):
+        if registry is None or CarlaDataProvider._observation_registry is registry:
+            CarlaDataProvider._observation_registry = None
 
     @staticmethod
     def get_client():
@@ -206,6 +245,9 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         Return world
         """
+        registry = CarlaDataProvider._observation_registry
+        if registry is not None and CarlaDataProvider._world is not None:
+            return registry.proxy_for_world(CarlaDataProvider._world)
         return CarlaDataProvider._world
 
     @staticmethod
@@ -593,7 +635,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         if actor is None:
             return None
 
-        CarlaDataProvider._carla_actor_pool[actor.id] = actor
+        CarlaDataProvider._carla_actor_pool[int(actor.id)] = actor
         CarlaDataProvider.register_actor(actor)
         return actor
 
@@ -660,7 +702,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         for actor in actors:
             if actor is None:
                 continue
-            CarlaDataProvider._carla_actor_pool[actor.id] = actor
+            CarlaDataProvider._carla_actor_pool[int(actor.id)] = actor
             CarlaDataProvider.register_actor(actor)
         return actors
 
@@ -716,7 +758,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         for actor in actors:
             if actor is None:
                 continue
-            CarlaDataProvider._carla_actor_pool[actor.id] = actor
+            CarlaDataProvider._carla_actor_pool[int(actor.id)] = actor
             CarlaDataProvider.register_actor(actor)
         return actors
 
@@ -727,7 +769,16 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
 
         Note: iteritems from six is used to allow compatibility with Python 2 and 3
         """
-        return iteritems(CarlaDataProvider._carla_actor_pool)
+        registry = CarlaDataProvider._observation_registry
+        if registry is None:
+            return iteritems(CarlaDataProvider._carla_actor_pool)
+        return iter(
+            (
+                actor_id,
+                registry.proxy_for_actor(actor, world=CarlaDataProvider._world),
+            )
+            for actor_id, actor in CarlaDataProvider._carla_actor_pool.items()
+        )
 
     @staticmethod
     def actor_id_exists(actor_id):
@@ -745,8 +796,12 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         Get the actor object of the hero actor if it exists, returns none otherwise.
         """
         for actor_id in CarlaDataProvider._carla_actor_pool:
-            if CarlaDataProvider._carla_actor_pool[actor_id].attributes['role_name'] == 'hero':
-                return CarlaDataProvider._carla_actor_pool[actor_id]
+            actor = CarlaDataProvider._carla_actor_pool[actor_id]
+            if actor.attributes['role_name'] == 'hero':
+                registry = CarlaDataProvider._observation_registry
+                if registry is not None:
+                    return registry.proxy_for_actor(actor, world=CarlaDataProvider._world)
+                return actor
         return None
 
     @staticmethod
@@ -755,8 +810,13 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         Get an actor from the pool by using its ID. If the actor
         does not exist, None is returned.
         """
+        actor_id = int(actor_id)
         if actor_id in CarlaDataProvider._carla_actor_pool:
-            return CarlaDataProvider._carla_actor_pool[actor_id]
+            actor = CarlaDataProvider._carla_actor_pool[actor_id]
+            registry = CarlaDataProvider._observation_registry
+            if registry is not None:
+                return registry.proxy_for_actor(actor, world=CarlaDataProvider._world)
+            return actor
 
         print("Non-existing actor id {}".format(actor_id))
         return None
@@ -808,6 +868,9 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         but as this might not be used by everyone, only get the actors the first time someone
         calls asks for them. 'CarlaDataProvider._all_actors' is reset each tick to None.
         """
+        registry = CarlaDataProvider._observation_registry
+        if registry is not None and CarlaDataProvider._world is not None:
+            return registry.proxy_for_world(CarlaDataProvider._world).get_actors()
         if CarlaDataProvider._all_actors:
             return CarlaDataProvider._all_actors
 
@@ -839,6 +902,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         CarlaDataProvider._actor_velocity_map.clear()
         CarlaDataProvider._actor_location_map.clear()
         CarlaDataProvider._actor_transform_map.clear()
+        CarlaDataProvider._actor_refs.clear()
         CarlaDataProvider._traffic_light_map.clear()
         CarlaDataProvider._map = None
         CarlaDataProvider._world = None
@@ -849,10 +913,10 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         CarlaDataProvider._client = None
         CarlaDataProvider._spawn_points = None
         CarlaDataProvider._spawn_index = 0
+        CarlaDataProvider._observation_registry = None
         # Randomize during data generation. Fix during evaluation for
         # repeatability.
         if int(os.environ.get('DATAGEN', 0)):
             CarlaDataProvider._rng = random.RandomState(seed=None)
         else:
             CarlaDataProvider._rng = random.RandomState(seed=2000)
-
